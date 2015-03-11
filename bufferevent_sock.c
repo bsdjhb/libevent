@@ -75,11 +75,23 @@
 #include "iocp-internal.h"
 #endif
 
+#ifdef TCP_STATIC_DDP
+struct ddp_mapping {
+	void *lock;
+	struct tcp_ddp_map map;
+	int refcnt;
+};
+
+struct ddp_buffer {
+	evutil_socket_t fd;
+	struct ddp_mapping *map;
+	int bufid;
+};
+
 struct bufferevent_sock {
 	struct bufferevent_private bev;
 #ifdef TCP_STATIC_DDP
-	int using_ddp;
-	struct tcp_ddp_map ddp_map;
+	struct ddp_mapping *ddp_map;
 #endif
 };
 
@@ -130,33 +142,47 @@ bufferevent_socket_outbuf_cb(struct evbuffer *buf,
 }
 
 #ifdef TCP_STATIC_DDP
-struct ddp_buf {
-	evutil_socket_t fd;
-	int bufid;
-};
+static struct ddp_mapping *
+ddp_mapping_ref(struct ddp_mapping *map)
+{
+	EVLOCK_LOCK(map->lock, 0);
+	++map->refcnt;
+	EVLOCK_UNLOCK(map->lock, 0);
+	return map;
+}
+
+static void
+ddp_mapping_free(struct ddp_mapping *map)
+{
+	int refcnt;
+
+	EVLOCK_LOCK(map->lock, 0);
+	refcnt = --map->refcnt;
+	EVLOCK_UNLOCK(map->lock, 0);
+	if (refcnt > 0)
+		return;
+	EVUTIL_ASSERT(refcnt == 0);
+
+	(void)munmap(map->map.address, map->map.length);
+	EVTHREAD_FREE_LOCK(map->lock, 0);
+	mm_free(map);
+}
 
 static void
 ddp_cleanup(const void *data, size_t datalen, void *extra)
 {
-	struct ddp_buf *db;
+	struct ddp_buffer *db;
 
 	db = extra;
 	(void)setsockopt(db->fd, IPPROTO_TCP, TCP_DDP_POST, &db->bufid,
 	    sizeof(db->bufid));
-
-	/*
-	 * XXX: Eventually this should also drop a reference on the
-	 * DDP mapping so the mapping can be released.  Note that
-	 * data might sit in a buffer after the socket is closed
-	 * until the data is consumed, so we can't munmap() on socket
-	 * close.
-	 */
+	ddp_mapping_free(db->map);
 	mm_free(db);
 }
 
 static int
 ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
-	struct tcp_ddp_map *ddp_map)
+	struct ddp_mapping *map)
 {
 	struct tcp_ddp_read tdr;
 	struct ddp_buf *db;
@@ -184,10 +210,12 @@ ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
 			break;
 		db.fd = fd;
 		db.bufid = tdr.bufid;
-		res = evbuffer_add_reference(buf, (char *)ddp_map->address +
+		db.map = ddp_mapping_ref(map);
+		res = evbuffer_add_reference(buf, (char *)map->map.address +
 		    tdr.offset, tdr.length, ddp_cleanup, db);
 		if (res == -1) {
 			/* XXX: This loses the returned data. */
+			ddp_mapping_free(db->map);
 			mm_free(db);
 			break;
 		}
@@ -201,22 +229,33 @@ ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
 	return nread;
 }
 
-static int
-ddp_enable(evutil_socket_t fd, struct tcp_ddp_map *ddp_map)
+static struct ddp_mapping *
+ddp_enable(evutil_socket_t fd)
 {
+	struct ddp_mapping *map;
 	socklen_t len;
 	int optval;
+
+	map = mm_calloc(1, sizeof(*map));
+	if (map == NULL)
+		return;
 
 	/* XXX: Consider allowing different counts or buffer sizes. */
 	optval = 1;
 	len = sizeof(optval);
-	if (setsockopt(fd, IPPROTO_TCP, TCP_DDP_STATIC, &optval, len) == -1)
-		return 0;
-	len = sizeof(*ddp_map);
-	if (getsockopt(fd, IPPROTO_TCP, TCP_DDP_MAP, ddp_map, &len) == -1)
+	if (setsockopt(fd, IPPROTO_TCP, TCP_DDP_STATIC, &optval, len) == -1) {
+		mm_free(map);
+		return NULL;
+	}
+	len = sizeof(map->map);
+	if (getsockopt(fd, IPPROTO_TCP, TCP_DDP_MAP, &map->map, &len) == -1) {
 		/* XXX: A bit stuck here as the static DDP can't be undone. */
-		return 0;
-	return 1;
+		mm_free(map);
+		return NULL;
+	}
+	EVTHREAD_ALLOC_LOCK(map->lock, 0);
+	map->refcnt = 1;
+	return map;
 }
 #endif
 
@@ -269,8 +308,8 @@ bufferevent_readcb(evutil_socket_t fd, short event, void *arg)
 
 	evbuffer_unfreeze(input, 0);
 #ifdef TCP_STATIC_DDP
-	if (bufev_s->using_ddp)
-		res = ddp_read(input, fd, (int)howmuch, &bufev_s->ddp_map);
+	if (bufev_s->ddp_map)
+		res = ddp_read(input, fd, (int)howmuch, bufev_s->ddp_map);
 	else
 #endif
 	res = evbuffer_read(input, fd, (int)howmuch); /* XXXX evbuffer_read would do better to take and return ev_ssize_t */
@@ -353,7 +392,8 @@ bufferevent_writecb(evutil_socket_t fd, short event, void *arg)
 		} else {
 			connected = 1;
 #ifdef TCP_STATIC_DDP
-			bufev_s->using_ddp = ddp_enable(fd, &bufev_s->ddp_map);
+			EVUTIL_ASSERT(bufev_s->ddp_map == NULL);
+			bufev_s->ddp_map = ddp_enable(fd);
 #endif
 #ifdef _WIN32
 			if (BEV_IS_ASYNC(bufev)) {
@@ -451,7 +491,7 @@ bufferevent_socket_new(struct event_base *base, evutil_socket_t fd,
 	}
 #ifdef TCP_STATIC_DDP
 	if (fd >= 0)
-		bufev_s->using_ddp = ddp_enable(fd, &bufev_s->ddp_map);
+		bufev_s->ddp_map = ddp_enable(fd);
 #endif
 	bufev = &bufev_s->bev.bev;
 	evbuffer_set_flags(bufev->output, EVBUFFER_FLAG_DRAINS_TO_FD);
@@ -703,13 +743,18 @@ be_socket_destruct(struct bufferevent *bufev)
 {
 	struct bufferevent_private *bufev_p =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
+#ifdef TCP_STATIC_DDP
+	struct bufferevent_sock *bufev_s =
+	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
+#endif
 	evutil_socket_t fd;
 	EVUTIL_ASSERT(bufev->be_ops == &bufferevent_ops_socket);
 
 	fd = event_get_fd(&bufev->ev_read);
 
 #ifdef TCP_STATIC_DDP
-	/* XXX: unmap DDP buffer */
+	if (bufev_s->ddp_map)
+		ddp_mapping_free(bufev_s->ddp_map);
 #endif
 	if ((bufev_p->options & BEV_OPT_CLOSE_ON_FREE) && fd >= 0)
 		EVUTIL_CLOSESOCKET(fd);
