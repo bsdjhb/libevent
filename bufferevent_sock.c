@@ -34,6 +34,9 @@
 #ifdef EVENT__HAVE_SYS_TIME_H
 #include <sys/time.h>
 #endif
+#ifdef EVENT__HAVE_SYS_MMAN_H
+#include <sys/mman.h>
+#endif
 
 #include <errno.h>
 #include <stdio.h>
@@ -59,6 +62,9 @@
 #endif
 #ifdef EVENT__HAVE_NETINET_IN6_H
 #include <netinet/in6.h>
+#endif
+#ifdef EVENT__HAVE_NETINET_TCP_H
+#include <netinet/tcp.h>
 #endif
 
 #include "event2/util.h"
@@ -186,7 +192,7 @@ ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
 	struct ddp_mapping *map)
 {
 	struct tcp_ddp_read tdr;
-	struct ddp_buf *db;
+	struct ddp_buffer *db;
 	socklen_t len;
 	int nread, res;
 
@@ -199,7 +205,7 @@ ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
 	for (;;) {
 		len = sizeof(tdr);
 		if (getsockopt(fd, IPPROTO_TCP, TCP_DDP_READ, &tdr,
-		    &olen) == -1)
+		    &len) == -1)
 			break;
 		if (tdr.length == 0) {
 			if (nread == -1)
@@ -209,9 +215,9 @@ ddp_read(struct evbuffer *buf, evutil_socket_t fd, int howmuch,
 		db = mm_malloc(sizeof(*db));
 		if (db == NULL)
 			break;
-		db.fd = fd;
-		db.bufid = tdr.bufid;
-		db.map = ddp_mapping_ref(map);
+		db->fd = fd;
+		db->bufid = tdr.bufid;
+		db->map = ddp_mapping_ref(map);
 		res = evbuffer_add_reference(buf, (char *)map->map.address +
 		    tdr.offset, tdr.length, ddp_cleanup, db);
 		if (res == -1) {
@@ -239,7 +245,7 @@ ddp_enable(evutil_socket_t fd)
 
 	map = mm_calloc(1, sizeof(*map));
 	if (map == NULL)
-		return;
+		return NULL;
 
 	/* XXX: Consider allowing different counts or buffer sizes. */
 	optval = 1;
@@ -268,7 +274,7 @@ bufferevent_readcb(evutil_socket_t fd, short event, void *arg)
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
 #ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
-	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
+	    EVUTIL_UPCAST(bufev, struct bufferevent_sock, bev);
 #endif
 	struct evbuffer *input;
 	int res = 0;
@@ -356,7 +362,7 @@ bufferevent_writecb(evutil_socket_t fd, short event, void *arg)
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
 #ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
-	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
+	    EVUTIL_UPCAST(bufev, struct bufferevent_sock, bev);
 #endif
 	int res = 0;
 	short what = BEV_EVENT_WRITING;
@@ -746,7 +752,7 @@ be_socket_destruct(struct bufferevent *bufev)
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
 #ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
-	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
+	    EVUTIL_UPCAST(bufev, struct bufferevent_sock, bev);
 #endif
 	evutil_socket_t fd;
 	EVUTIL_ASSERT(bufev->be_ops == &bufferevent_ops_socket);
