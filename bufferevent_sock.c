@@ -87,6 +87,7 @@ struct ddp_buffer {
 	struct ddp_mapping *map;
 	int bufid;
 };
+#endif
 
 struct bufferevent_sock {
 	struct bufferevent_private bev;
@@ -484,9 +485,9 @@ bufferevent_socket_new(struct event_base *base, evutil_socket_t fd,
 	if ((bufev_s = mm_calloc(1, sizeof(struct bufferevent_sock)))== NULL)
 		return NULL;
 
-	if (bufferevent_init_common_(bufev_s, base, &bufferevent_ops_socket,
-				    options) < 0) {
-		mm_free(bufev_p);
+	if (bufferevent_init_common_(&bufev_s->bev, base,
+				    &bufferevent_ops_socket, options) < 0) {
+		mm_free(bufev_s);
 		return NULL;
 	}
 #ifdef TCP_DDP_STATIC
