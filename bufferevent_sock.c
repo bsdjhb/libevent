@@ -75,7 +75,7 @@
 #include "iocp-internal.h"
 #endif
 
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 struct ddp_mapping {
 	void *lock;
 	struct tcp_ddp_map map;
@@ -90,7 +90,7 @@ struct ddp_buffer {
 
 struct bufferevent_sock {
 	struct bufferevent_private bev;
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	struct ddp_mapping *ddp_map;
 #endif
 };
@@ -141,7 +141,7 @@ bufferevent_socket_outbuf_cb(struct evbuffer *buf,
 	}
 }
 
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 static struct ddp_mapping *
 ddp_mapping_ref(struct ddp_mapping *map)
 {
@@ -265,7 +265,7 @@ bufferevent_readcb(evutil_socket_t fd, short event, void *arg)
 	struct bufferevent *bufev = arg;
 	struct bufferevent_private *bufev_p =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
 #endif
@@ -307,7 +307,7 @@ bufferevent_readcb(evutil_socket_t fd, short event, void *arg)
 		goto done;
 
 	evbuffer_unfreeze(input, 0);
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	if (bufev_s->ddp_map)
 		res = ddp_read(input, fd, (int)howmuch, bufev_s->ddp_map);
 	else
@@ -353,7 +353,7 @@ bufferevent_writecb(evutil_socket_t fd, short event, void *arg)
 	struct bufferevent *bufev = arg;
 	struct bufferevent_private *bufev_p =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
 #endif
@@ -391,7 +391,7 @@ bufferevent_writecb(evutil_socket_t fd, short event, void *arg)
 			goto done;
 		} else {
 			connected = 1;
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 			EVUTIL_ASSERT(bufev_s->ddp_map == NULL);
 			bufev_s->ddp_map = ddp_enable(fd);
 #endif
@@ -489,7 +489,7 @@ bufferevent_socket_new(struct event_base *base, evutil_socket_t fd,
 		mm_free(bufev_p);
 		return NULL;
 	}
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	if (fd >= 0)
 		bufev_s->ddp_map = ddp_enable(fd);
 #endif
@@ -743,7 +743,7 @@ be_socket_destruct(struct bufferevent *bufev)
 {
 	struct bufferevent_private *bufev_p =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_private, bev);
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	struct bufferevent_sock *bufev_s =
 	    EVUTIL_UPCAST(bufev, struct bufferevent_socket, bev);
 #endif
@@ -752,7 +752,7 @@ be_socket_destruct(struct bufferevent *bufev)
 
 	fd = event_get_fd(&bufev->ev_read);
 
-#ifdef TCP_STATIC_DDP
+#ifdef TCP_DDP_STATIC
 	if (bufev_s->ddp_map)
 		ddp_mapping_free(bufev_s->ddp_map);
 #endif
